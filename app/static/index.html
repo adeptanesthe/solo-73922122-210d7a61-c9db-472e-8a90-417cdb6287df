@@ -63,6 +63,21 @@
         <canvas id="canvas" width="640" height="360"></canvas>
         <div id="no-session" class="muted">请先上传数据或加载示例。</div>
       </div>
+      <div id="registration-panel">
+        <div class="reg-head">
+          <h3>背景配准（当前帧 → 下一帧）</h3>
+          <button id="reg-rerun" class="secondary" disabled>重新估计</button>
+        </div>
+        <div id="reg-status" class="muted small">载入会话后将对相邻帧自动估计镜头平移（仅用检测框外的背景）。</div>
+        <div id="reg-result" hidden>
+          <div id="reg-shift" class="reg-shift"></div>
+          <div class="muted small reg-hint">
+            位移 (dx, dy)：把下一帧整体平移该像素数即可与当前帧背景对齐。
+            叠图中当前帧为底，下一帧半透明覆盖；背景重合即说明估计可靠。
+          </div>
+          <img id="reg-overlay" alt="对齐后的半透明叠图">
+        </div>
+      </div>
       <div id="selection-info" class="muted">未选择框。</div>
       <div class="btn-row">
         <button id="mark-same" disabled>标记为同只</button>

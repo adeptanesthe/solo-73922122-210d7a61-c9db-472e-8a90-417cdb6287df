@@ -200,3 +200,33 @@ button.secondary { background: transparent; }
 
 #session-info { font-size: 12px; margin-top: 8px; line-height: 1.6; }
 #solve-status { margin-top: 8px; line-height: 1.6; }
+
+#registration-panel {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+#registration-panel .reg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#registration-panel h3 { margin: 0 0 6px; font-size: 13px; }
+#registration-panel button { padding: 3px 10px; font-size: 12px; }
+#reg-status { line-height: 1.6; min-height: 18px; }
+#reg-result { margin-top: 8px; }
+.reg-shift {
+  font-size: 14px;
+  font-weight: 600;
+  color: #7ee2a0;
+  margin-bottom: 4px;
+}
+.reg-hint { line-height: 1.6; margin-bottom: 8px; }
+#reg-overlay {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import math
@@ -21,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .example import EXAMPLE_DESCRIPTION, build_example_detections, build_example_frames
+from .registration import RegistrationError, register_pair, render_overlay
 from .solver import InputConflict, solve_tracking
 
 MAX_FRAMES = 10
@@ -40,7 +42,18 @@ app = FastAPI(title="野生动物追踪串号校正与计数台")
 
 SESSIONS: dict[str, dict] = {}
 JOBS: dict[str, dict] = {}
+REG_JOBS: dict[str, dict] = {}  # 背景配准异步任务
 EXECUTOR = ThreadPoolExecutor(max_workers=4)
+MAX_JOBS_KEPT = 100  # 每类任务在内存中保留的上限，超出时丢弃最旧的已结束任务
+
+
+def _cap_jobs(store: dict):
+    """任务字典超过上限时，丢弃最早创建且已结束的任务，避免内存无限增长。"""
+    if len(store) <= MAX_JOBS_KEPT:
+        return
+    finished = [k for k, v in store.items() if v.get("status") != "running"]
+    for k in finished[: len(store) - MAX_JOBS_KEPT]:
+        store.pop(k, None)
 
 
 # ---------------------------------------------------------------- 工具
@@ -296,6 +309,7 @@ async def start_solve(sid: str):
         "params": dict(sess["params"]),
     }
     JOBS[job_id] = {"status": "running", "version": sess["version"], "result": None, "error": None}
+    _cap_jobs(JOBS)
     loop = asyncio.get_running_loop()
     loop.run_in_executor(EXECUTOR, _run_job, job_id, snapshot)
     return {"job_id": job_id, "version": sess["version"]}
@@ -306,6 +320,105 @@ async def get_job(job_id: str):
     job = JOBS.get(job_id)
     if job is None:
         _err(404, "求解任务不存在。")
+    return job
+
+
+# ---------------------------------------------------------------- 背景配准
+
+class RegistrationBody(BaseModel):
+    frame: int = Field(ge=0)
+
+
+def _run_registration(job_id: str, sid: str, frame: int, version: int):
+    """线程池任务：估计 (frame, frame+1) 的背景平移并渲染叠图。
+
+    任何异常都收敛为 unreliable 或 error，不允许拖垮服务；
+    结果携带会话版本，前端据此丢弃换会话/切帧后的迟到结果。
+    """
+    sess = SESSIONS.get(sid)
+    if sess is None:
+        REG_JOBS[job_id].update(
+            status="done",
+            result={
+                "reliable": False,
+                "frame": frame,
+                "dx": None,
+                "dy": None,
+                "reason_code": "session_gone",
+                "reason": "会话已不存在，配准结果作废。",
+                "overlay": None,
+                "version": version,
+            },
+        )
+        return
+    try:
+        if frame + 1 >= len(sess["frames"]):
+            out = {
+                "reliable": False, "frame": frame, "dx": None, "dy": None,
+                "reason_code": "last_frame",
+                "reason": "当前是最后一帧，没有下一帧可与它配准。",
+                "overlay": None, "version": version,
+            }
+            REG_JOBS[job_id].update(status="done", result=out)
+            return
+        img_a = sess["frames"][frame][1]
+        img_b = sess["frames"][frame + 1][1]
+        dets_a = [d for d in sess["detections"] if d["frame"] == frame]
+        dets_b = [d for d in sess["detections"] if d["frame"] == frame + 1]
+        verdict = register_pair(img_a, img_b, dets_a, dets_b)
+        overlay_b64 = None
+        if verdict["reliable"]:
+            overlay = render_overlay(img_a, img_b, verdict["dx"], verdict["dy"])
+            overlay_b64 = "data:image/png;base64," + base64.b64encode(overlay).decode("ascii")
+        out = {
+            "reliable": verdict["reliable"],
+            "frame": frame,
+            "dx": verdict["dx"],
+            "dy": verdict["dy"],
+            "reason_code": verdict["reason_code"],
+            "reason": verdict["reason"],
+            "n_regions": verdict["n_regions"],
+            "n_blocks": verdict["n_blocks"],
+            "overlay": overlay_b64,
+            "version": version,
+        }
+        REG_JOBS[job_id].update(status="done", result=out)
+    except RegistrationError as exc:
+        REG_JOBS[job_id].update(
+            status="done",
+            result={
+                "reliable": False, "frame": frame, "dx": None, "dy": None,
+                "reason_code": exc.code, "reason": str(exc),
+                "overlay": None, "version": version,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - 配准异常不能拖垮服务
+        REG_JOBS[job_id].update(status="error", error=f"配准内部错误：{exc}")
+
+
+@app.post("/api/sessions/{sid}/registration")
+async def start_registration(sid: str, body: RegistrationBody):
+    """启动相邻帧背景配准（当前帧 frame 与 frame+1），异步返回任务 id。"""
+    sess = _get_session(sid)
+    if not (0 <= body.frame < len(sess["frames"])):
+        _err(400, f"帧号 {body.frame} 超出范围。")
+    if body.frame + 1 >= len(sess["frames"]):
+        _err(400, "当前是最后一帧，没有下一帧可与它配准。")
+    job_id = uuid.uuid4().hex[:12]
+    REG_JOBS[job_id] = {"status": "running", "frame": body.frame, "result": None, "error": None}
+    _cap_jobs(REG_JOBS)
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(
+        EXECUTOR, _run_registration, job_id, sid, body.frame, sess["version"]
+    )
+    return {"job_id": job_id, "frame": body.frame, "version": sess["version"]}
+
+
+@app.get("/api/registration-jobs/{job_id}")
+async def get_registration_job(job_id: str):
+    job = REG_JOBS.get(job_id)
+    if job is None:
+        _err(404, "配准任务不存在。")
     return job
 
 

@@ -20,6 +20,10 @@ const state = {
   result: null,           // 当前展示的求解结果
   jobId: null,
   pollTimer: null,
+  // 背景配准
+  regToken: 0,            // 每次请求自增；响应只在 token 仍为最新时才展示
+  regJobId: null,
+  regPollTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -73,6 +77,7 @@ function loadSession(payload) {
   state.result = null;
   state.jobId = null;
   if (state.pollTimer) { clearTimeout(state.pollTimer); state.pollTimer = null; }
+  resetRegistration(); // 换会话立即撤下旧配准
 
   state.images = [];
   for (let i = 0; i < state.nFrames; i++) {
@@ -96,7 +101,9 @@ function loadSession(payload) {
 
   $("solve-btn").disabled = false;
   $("no-session").style.display = "none";
+  $("reg-rerun").disabled = false;
   renderAll();
+  requestRegistration(); // 载入会话后对第 0/1 帧自动配准
 }
 
 async function uploadSession() {
@@ -178,6 +185,107 @@ function switchFrame(delta) {
   state.currentFrame = next;
   renderFrameNav();
   draw();
+  resetRegistration(); // 切帧立即撤下旧配准，迟到结果不能覆盖当前画面
+  requestRegistration();
+}
+
+/* ------------------------------------------------------------ 背景配准 */
+
+function resetRegistration() {
+  state.regToken += 1; // 使在途的旧响应全部失效
+  state.regJobId = null;
+  if (state.regPollTimer) { clearTimeout(state.regPollTimer); state.regPollTimer = null; }
+  const panel = $("reg-result");
+  panel.hidden = true;
+  $("reg-overlay").removeAttribute("src");
+  const status = $("reg-status");
+  status.className = "muted small";
+  status.style.color = "";
+  status.textContent = "正在撤下旧配准…";
+}
+
+async function requestRegistration() {
+  if (!state.sessionId) return;
+  const status = $("reg-status");
+  // 最后一帧：没有下一帧，不发请求，也不显示位移与叠图
+  if (state.currentFrame >= state.nFrames - 1) {
+    status.className = "muted small";
+    status.style.color = "";
+    status.textContent = "当前是最后一帧，没有下一帧可与它配准。";
+    return;
+  }
+  const token = state.regToken;
+  status.className = "muted small";
+  status.style.color = "";
+  status.textContent =
+    `正在估计第 ${state.currentFrame + 1} 帧与第 ${state.currentFrame + 2} 帧的背景平移…`;
+  try {
+    const resp = await api(
+      `/api/sessions/${state.sessionId}/registration`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ frame: state.currentFrame }),
+      }
+    );
+    if (token !== state.regToken) return; // 切帧/换会话后的迟到响应
+    state.regJobId = resp.job_id;
+    pollRegistration(resp.job_id, token);
+  } catch (err) {
+    if (token !== state.regToken) return;
+    showRegError(err.message);
+  }
+}
+
+function pollRegistration(jobId, token) {
+  api(`/api/registration-jobs/${jobId}`)
+    .then((job) => {
+      if (token !== state.regToken || jobId !== state.regJobId) return; // 已被取代
+      if (job.status === "running") {
+        state.regPollTimer = setTimeout(() => pollRegistration(jobId, token), 300);
+        return;
+      }
+      if (job.status === "error") {
+        showRegError(job.error || "配准失败。");
+        return;
+      }
+      renderRegistration(job.result, token);
+    })
+    .catch((err) => {
+      if (token !== state.regToken) return;
+      showRegError(err.message);
+    });
+}
+
+function showRegError(msg) {
+  const status = $("reg-status");
+  status.className = "small";
+  status.style.color = "#ff9d97";
+  status.textContent = `错误：${msg}`;
+}
+
+function renderRegistration(result, token) {
+  if (token !== state.regToken) return; // 迟到结果不覆盖当前画面
+  const status = $("reg-status");
+  const panel = $("reg-result");
+  if (!result || !result.reliable) {
+    panel.hidden = true; // 不可靠：不显示位移及叠图
+    status.className = "small";
+    status.style.color = "#ffd887";
+    const reason = result && result.reason ? result.reason : "无法可靠配准。";
+    const nReg = result ? `（可信区域 ${result.n_regions}/${result.n_blocks}）` : "";
+    status.textContent = `无法可靠配准：${reason}${nReg} 不显示位移及叠图。`;
+    return;
+  }
+  status.className = "small";
+  status.style.color = "#7ee2a0";
+  status.textContent =
+    `配准成功：${result.n_regions} 个分散背景区域一致指向同一位移（共 ${result.n_blocks} 个候选区域）。`;
+  $("reg-shift").textContent =
+    `位移 dx = ${result.dx} 像素，dy = ${result.dy} 像素（搜索范围 ±16）`;
+  const img = $("reg-overlay");
+  img.src = result.overlay;
+  panel.hidden = false;
 }
 
 /* ------------------------------------------------------------ 选择与标记 */
@@ -453,6 +561,10 @@ $("mark-same").addEventListener("click", () => setJudgment("same"));
 $("mark-diff").addEventListener("click", () => setJudgment("different"));
 $("mark-clear").addEventListener("click", () => setJudgment(null));
 $("solve-btn").addEventListener("click", solve);
+$("reg-rerun").addEventListener("click", () => {
+  resetRegistration();
+  requestRegistration();
+});
 canvas.addEventListener("click", onCanvasClick);
 for (const id of ["p-wdist", "p-wapp", "p-penalty"]) {
   $(id).addEventListener("change", applyParams);

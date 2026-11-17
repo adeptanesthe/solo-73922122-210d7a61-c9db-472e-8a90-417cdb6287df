@@ -73,6 +73,34 @@ def _draw_animal(draw, cx, cy, rgb, r=13):
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=rgb, outline=(20, 20, 20))
 
 
+def _fixed_landmarks():
+    """帧间位置固定的背景地物（石块/灌丛），用于演示背景配准。
+
+    用固定种子生成，保证每帧画在同一坐标上；与随机草地噪点共同构成
+    可跨帧匹配的静态纹理。
+    """
+    rng = random.Random(20240520)
+    marks = []
+    for _ in range(34):
+        x = rng.randrange(8, WIDTH - 8)
+        y = rng.randrange(20, HEIGHT - 8)
+        kind = rng.choice(("rock", "bush", "tuft"))
+        marks.append((x, y, kind))
+    return marks
+
+
+LANDMARKS = _fixed_landmarks()
+
+
+def _draw_landmark(draw, x, y, kind):
+    if kind == "rock":
+        draw.ellipse([x - 4, y - 3, x + 4, y + 3], fill=(96, 96, 102), outline=(60, 60, 64))
+    elif kind == "bush":
+        draw.rectangle([x - 3, y - 3, x + 3, y + 3], fill=(24, 70, 28), outline=(16, 48, 20))
+    else:
+        draw.line([x - 3, y + 2, x, y - 4, x + 3, y + 2], fill=(70, 110, 50), width=1)
+
+
 def build_example_frames():
     """返回 [(content_type, png_bytes), ...] 共 6 帧。"""
     rng = random.Random(7)
@@ -80,6 +108,9 @@ def build_example_frames():
     for f in range(N_FRAMES):
         img = Image.new("RGB", (WIDTH, HEIGHT), (34, 52, 34))
         draw = ImageDraw.Draw(img)
+        # 固定背景地物（每帧坐标一致，是背景配准的主要依据）
+        for x, y, kind in LANDMARKS:
+            _draw_landmark(draw, x, y, kind)
         # 草地噪点
         for _ in range(450):
             x = rng.randrange(WIDTH)
